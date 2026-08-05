@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate a fixed-layout CNN Fear & Greed dashboard and publish it to Discord."""
+"""Generate a live CNN Fear & Greed dashboard and publish it to Discord."""
 from __future__ import annotations
 
 import json
@@ -65,6 +65,7 @@ class Snapshot:
     timestamp: datetime
     previous_close: float | None
     previous_1_week: float | None
+    previous_1_month: float | None
     history: tuple[HistoryPoint, ...]
 
 
@@ -115,6 +116,15 @@ def change_text(current: float, previous: float | None) -> str:
     return f"{'↑' if delta > 0 else '↓'} {abs(delta):.1f}"
 
 
+def objective_comment(snapshot: Snapshot) -> str:
+    label = zone_label(snapshot.score)
+    if snapshot.score >= 56:
+        return f"市场情绪处于{label}区间，风险偏好较高。"
+    if snapshot.score <= 44:
+        return f"市场情绪处于{label}区间，风险偏好较低。"
+    return "市场情绪处于中性区间，风险偏好相对均衡。"
+
+
 def _parse_datetime(value: Any) -> datetime:
     if isinstance(value, (int, float)):
         number = float(value)
@@ -152,7 +162,12 @@ def _history(payload: dict[str, Any]) -> tuple[HistoryPoint, ...]:
     for row in rows:
         if not isinstance(row, dict):
             continue
-        score = next((_number(row.get(k)) for k in ("y", "score", "value") if _number(row.get(k)) is not None), None)
+        score = None
+        for key in ("y", "score", "value"):
+            candidate = _number(row.get(key))
+            if candidate is not None:
+                score = candidate
+                break
         raw_time = next((row.get(k) for k in ("x", "timestamp", "date") if row.get(k) is not None), None)
         if score is not None and raw_time is not None:
             points.append(HistoryPoint(_parse_datetime(raw_time), score))
@@ -202,6 +217,7 @@ def parse_snapshot(payload: dict[str, Any]) -> Snapshot:
         timestamp=timestamp,
         previous_close=_number(current.get("previous_close")),
         previous_1_week=_number(current.get("previous_1_week")),
+        previous_1_month=_number(current.get("previous_1_month")),
         history=tuple(history[-30:]),
     )
 
@@ -234,21 +250,23 @@ def centered(draw: ImageDraw.ImageDraw, center: tuple[float, float], text: str, 
 
 def pill(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], text: str, score: float | None) -> None:
     draw.rounded_rectangle(box, radius=(box[3] - box[1]) // 2, fill=zone_fill(score))
-    centered(draw, ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2), text, font(18, True), zone_color(score))
+    centered(draw, ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2), text, font(19, True), zone_color(score))
 
 
 def score_angle(score: float) -> float:
-    return 180 + max(0, min(100, score)) * 1.8
+    return 180 + score * 1.8
 
 
-def marker_segment(center: tuple[float, float], score: float, inner_radius: float = 238, outer_radius: float = 302) -> tuple[float, float, float, float]:
-    angle = math.radians(score_angle(score))
+def marker_segment(center: tuple[int, int], score: float) -> tuple[float, float, float, float]:
     cx, cy = center
+    angle = math.radians(score_angle(score))
+    inner = 246
+    outer = 302
     return (
-        cx + math.cos(angle) * inner_radius,
-        cy + math.sin(angle) * inner_radius,
-        cx + math.cos(angle) * outer_radius,
-        cy + math.sin(angle) * outer_radius,
+        cx + math.cos(angle) * inner,
+        cy + math.sin(angle) * inner,
+        cx + math.cos(angle) * outer,
+        cy + math.sin(angle) * outer,
     )
 
 
@@ -269,21 +287,27 @@ def render_card(snapshot: Snapshot, output_path: str = OUTPUT_PATH) -> str:
     meter_panel = (34, 128, 1052, 850)
     rounded(draw, meter_panel, 28)
     cx, cy = 520, 520
-    radius = 350
+    radius = 332
 
     segments = [(0, 24, "extreme fear"), (25, 44, "fear"), (45, 55, "neutral"), (56, 75, "greed"), (76, 100, "extreme greed")]
     for low, high, key in segments:
-        draw.arc((cx - radius, cy - radius, cx + radius, cy + radius), start=score_angle(low), end=score_angle(high), fill=COLORS[key], width=46)
+        draw.arc((cx - radius, cy - radius, cx + radius, cy + radius), start=score_angle(low), end=score_angle(high), fill=COLORS[key], width=52)
+
+    draw.arc((cx - 262, cy - 262, cx + 262, cy + 262), start=180, end=360, fill="#EEF2F7", width=2)
 
     for tick in range(0, 101, 5):
         a = math.radians(score_angle(tick))
-        outer = 305
-        inner = 279 if tick % 25 == 0 else 287
-        draw.line((cx + math.cos(a) * outer, cy + math.sin(a) * outer, cx + math.cos(a) * inner, cy + math.sin(a) * inner), fill="#CBD5E1", width=2 if tick % 25 == 0 else 1)
+        outer = 290
+        inner = 262 if tick % 25 == 0 else 272
+        draw.line(
+            (cx + math.cos(a) * outer, cy + math.sin(a) * outer, cx + math.cos(a) * inner, cy + math.sin(a) * inner),
+            fill="#CBD5E1",
+            width=2 if tick % 25 == 0 else 1,
+        )
         if tick % 25 == 0:
-            centered(draw, (cx + math.cos(a) * 248, cy + math.sin(a) * 248), str(tick), font(16), COLORS["text"])
+            centered(draw, (cx + math.cos(a) * 232, cy + math.sin(a) * 232), str(tick), font(16), COLORS["text"])
 
-    labels = [(128, 432, "extreme fear"), (292, 245, "fear"), (520, 176, "neutral"), (748, 245, "greed"), (912, 432, "extreme greed")]
+    labels = [(132, 430, "extreme fear"), (292, 220, "fear"), (520, 150, "neutral"), (748, 220, "greed"), (908, 430, "extreme greed")]
     for x, y, key in labels:
         label, score_range = ZONE_META[key]
         centered(draw, (x, y), label, font(22, True), COLORS[key])
@@ -294,9 +318,14 @@ def render_card(snapshot: Snapshot, output_path: str = OUTPUT_PATH) -> str:
     draw.ellipse((marker[0] - 10, marker[1] - 10, marker[0] + 10, marker[1] + 10), fill="#FFFFFF", outline=COLORS["text"], width=4)
 
     current_color = zone_color(snapshot.score)
-    centered(draw, (cx, 565), format_score(snapshot.score), font(118, True), current_color)
-    centered(draw, (cx, 675), zone_label(snapshot.score), font(56, True), current_color)
-    centered(draw, (cx, 740), snapshot.rating.upper(), font(24), COLORS["subtle"])
+    centered(draw, (cx, 392), "当前指数", font(21, True), COLORS["subtle"])
+    centered(draw, (cx, 500), format_score(snapshot.score), font(136, True), current_color)
+    centered(draw, (cx, 640), zone_label(snapshot.score), font(58, True), current_color)
+    centered(draw, (cx, 700), snapshot.rating.upper(), font(24), COLORS["subtle"])
+
+    delta_text = change_text(snapshot.score, snapshot.previous_close)
+    delta_color = COLORS["greed"] if delta_text.startswith("↑") else COLORS["extreme fear"] if delta_text.startswith("↓") else COLORS["subtle"]
+    centered(draw, (cx, 752), f"较上一交易日 {delta_text}", font(18, True), delta_color)
 
     history_panel = (1072, 128, 1566, 378)
     rounded(draw, history_panel, 26)
@@ -309,9 +338,9 @@ def render_card(snapshot: Snapshot, output_path: str = OUTPUT_PATH) -> str:
         centered(draw, (x + 103, y + 27), label, font(18), COLORS["muted"])
         centered(draw, (x + 103, y + 73), format_score(value), font(42, True), zone_color(value))
         pill(draw, (x + 20, y + 106, x + 116, y + 138), zone_label(value), value)
-        delta = change_text(snapshot.score, value)
-        delta_color = COLORS["greed"] if delta.startswith("↑") else COLORS["extreme fear"] if delta.startswith("↓") else COLORS["subtle"]
-        draw.text((x + 126, y + 111), delta, font=font(17, True), fill=delta_color)
+        change = change_text(snapshot.score, value)
+        change_color = COLORS["greed"] if change.startswith("↑") else COLORS["extreme fear"] if change.startswith("↓") else COLORS["subtle"]
+        draw.text((x + 126, y + 111), change, font=font(17, True), fill=change_color)
 
     trend_panel = (1072, 398, 1566, 850)
     rounded(draw, trend_panel, 26)
@@ -382,7 +411,12 @@ def multipart(payload: dict[str, Any], image_path: str) -> tuple[bytes, str]:
 
 def post_webhook(url: str, payload: dict[str, Any], image_path: str) -> None:
     body, boundary = multipart(payload, image_path)
-    request = Request(url, data=body, headers={"Content-Type": f"multipart/form-data; boundary={boundary}", "User-Agent": "fear-greed-discord/4.0"}, method="POST")
+    request = Request(
+        url,
+        data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}", "User-Agent": "fear-greed-discord/4.1"},
+        method="POST",
+    )
     try:
         with urlopen(request, timeout=TIMEOUT) as response:
             if getattr(response, "status", 204) not in (200, 204):
