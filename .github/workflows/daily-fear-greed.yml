@@ -8,6 +8,9 @@ on:
         required: false
         default: false
         type: boolean
+  push:
+    branches:
+      - main
   schedule:
     # 00:30 UTC = 08:30 China Standard Time.
     - cron: "30 0 * * *"
