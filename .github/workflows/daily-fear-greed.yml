@@ -4,13 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: Print payload without sending to Discord
+        description: Generate preview without sending to Discord
         required: false
         default: false
         type: boolean
   schedule:
     # 00:30 UTC = 08:30 China Standard Time.
-    # GitHub scheduled workflows can occasionally start several minutes late.
     - cron: "30 0 * * *"
 
 permissions:
@@ -23,7 +22,7 @@ concurrency:
 jobs:
   broadcast:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -33,13 +32,30 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install image dependencies and Chinese fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-noto-cjk
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
       - name: Run tests
         run: python -m unittest discover -s tests -v
 
-      - name: Broadcast to Discord
+      - name: Generate card and broadcast to Discord
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          OUTPUT_IMAGE_PATH: /tmp/fear-greed-card.png
           BROADCAST_TITLE: 美股 Fear & Greed 每日播报
           WEBHOOK_USERNAME: 市场情绪播报
         run: python src/fear_greed_bot.py
+
+      - name: Upload manual-run preview
+        if: always() && github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fear-greed-card-preview
+          path: /tmp/fear-greed-card.png
+          if-no-files-found: ignore
+          retention-days: 3
