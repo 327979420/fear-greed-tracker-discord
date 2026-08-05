@@ -1,25 +1,29 @@
 # Fear & Greed Discord 每日播报
 
-每天自动获取 **CNN 美股 Fear & Greed Index**，生成中文 Discord Embed，并通过 Discord Webhook 推送。
+每天自动获取 **CNN 美股 Fear & Greed Index**，生成一张中文市场情绪卡片，并通过 Discord Webhook 推送。
 
-## 已实现
+## 当前效果
 
-- 当前 Fear & Greed 分数与中文情绪区间
+每次播报会自动生成一张 `1200 × 675` PNG，内容包括：
+
+- 当前 Fear & Greed 分数和情绪区间
+- 半圆情绪仪表盘
 - 上一交易日、一周前、一个月前对比
-- 自动生成简短市场情绪解读
-- Discord 彩色 Embed
-- GitHub Actions 每日定时运行
-- 手动测试与 Dry Run
-- 网络重试、错误日志和单元测试
-- 不需要服务器，也不需要创建 Discord Bot
+- 近 30 个交易日情绪趋势
+- 自动市场解读
+- 简短 Discord 标题和图片附件
 
-## 默认时间
+图片颜色会根据指数自动变化：恐慌为红色，贪婪为绿色。
+
+## 自动运行
 
 GitHub Actions 默认每天 `00:30 UTC` 执行，即 **北京时间 08:30**。
 
-## 唯一必须配置的 Secret
+项目不需要服务器，也不需要 Discord Bot，只使用一个 Discord Webhook。
 
-在目标 GitHub 仓库中进入：
+## 必须配置的 Secret
+
+进入仓库：
 
 `Settings → Secrets and variables → Actions → New repository secret`
 
@@ -30,40 +34,32 @@ Name: DISCORD_WEBHOOK_URL
 Secret: 你的 Discord Webhook 完整地址
 ```
 
-不要把 Webhook URL 写进代码、README、Issue 或聊天截图。
+不要把 Webhook URL 写进代码、README、Issue 或公开截图。
 
-## 创建 Discord Webhook
+## 手动测试新版图片
 
-1. 打开需要接收播报的 Discord 频道。
-2. 点击频道设置。
-3. 进入 `Integrations → Webhooks`。
-4. 点击 `New Webhook`。
-5. 选择频道并复制 Webhook URL。
-6. 将它保存为 GitHub Secret `DISCORD_WEBHOOK_URL`。
-
-## 第一次测试
-
-进入 GitHub 仓库：
+进入：
 
 `Actions → Daily Fear & Greed Broadcast → Run workflow`
 
-- 先把 `dry_run` 设为 `true`，确认数据抓取和消息结构正常。
-- 再设为 `false`，确认 Discord 收到消息。
+- `dry_run: false`：生成图片并发送到 Discord
+- `dry_run: true`：只生成图片，不发送
 
-## 本地测试
+手动运行后，Actions 页面底部会出现 `fear-greed-card-preview`，可以下载查看本次生成的 PNG。预览文件保留 3 天。
 
-本项目只使用 Python 标准库，无需安装依赖。
+## 本地运行
 
 ```bash
+python -m pip install -r requirements.txt
 python -m unittest discover -s tests -v
 DRY_RUN=true python src/fear_greed_bot.py
 ```
 
+Linux 环境需要安装支持中文的字体，例如 `fonts-noto-cjk`。GitHub Actions 已经自动安装。
+
 ## 修改播报时间
 
 编辑 `.github/workflows/daily-fear-greed.yml` 中的 cron。GitHub Actions cron 使用 UTC。
-
-常用示例：
 
 ```yaml
 # 北京时间 08:30
@@ -71,17 +67,16 @@ DRY_RUN=true python src/fear_greed_bot.py
 
 # 北京时间 09:00
 - cron: "0 1 * * *"
-
-# 墨尔本时间不适合用固定 UTC 全年表达，因为存在夏令时切换。
 ```
 
-## 可选设置
+## 可选环境变量
 
-工作流中的环境变量可以修改：
-
-- `BROADCAST_TITLE`：卡片标题
+- `BROADCAST_TITLE`：Discord 消息标题
 - `WEBHOOK_USERNAME`：Discord 显示名称
-- `DISCORD_ROLE_MENTION`：需要提醒的角色，例如 `<@&123456789012345678>`
+- `DISCORD_ROLE_MENTION`：提醒指定角色，例如 `<@&123456789012345678>`
+- `OUTPUT_IMAGE_PATH`：生成图片的保存路径
+- `FONT_REGULAR`：自定义常规字体路径
+- `FONT_BOLD`：自定义粗体字体路径
 - `FNG_API_URL`：自定义数据接口
 
 ## 数据说明
