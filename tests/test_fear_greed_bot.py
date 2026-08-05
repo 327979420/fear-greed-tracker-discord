@@ -1,6 +1,10 @@
 import os
 import sys
+import tempfile
 import unittest
+from pathlib import Path
+
+from PIL import Image
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -10,6 +14,7 @@ from fear_greed_bot import (  # noqa: E402
     classify_score,
     market_commentary,
     parse_snapshot,
+    render_card,
 )
 
 
@@ -22,16 +27,25 @@ SAMPLE = {
         "previous_1_week": 61.2,
         "previous_1_month": 55.0,
         "previous_1_year": 44.0,
-    }
+    },
+    "fear_and_greed_historical": {
+        "data": [
+            {"x": 1, "y": 54.0},
+            {"x": 2, "y": 61.0},
+            {"x": 3, "y": 72.4},
+        ]
+    },
 }
 
 
 class FearGreedBotTests(unittest.TestCase):
-    def test_parse_snapshot(self):
+    def test_parse_snapshot_and_history(self):
         snapshot = parse_snapshot(SAMPLE)
         self.assertEqual(snapshot.score, 72.4)
         self.assertEqual(snapshot.rating, "greed")
         self.assertEqual(snapshot.previous_close, 68.0)
+        self.assertEqual(len(snapshot.history), 3)
+        self.assertEqual(snapshot.history[-1].score, 72.4)
 
     def test_classification_boundaries(self):
         self.assertEqual(classify_score(10), "extreme fear")
@@ -45,13 +59,25 @@ class FearGreedBotTests(unittest.TestCase):
         self.assertEqual(change_text(68.0, 72.4), "↓ 4.4")
         self.assertEqual(change_text(50.0, None), "暂无对比")
 
-    def test_payload_is_discord_embed(self):
+    def test_payload_references_attached_image(self):
         snapshot = parse_snapshot(SAMPLE)
         payload = build_discord_payload(snapshot)
         self.assertEqual(len(payload["embeds"]), 1)
-        self.assertIn("72.4 / 100", payload["embeds"][0]["description"])
-        self.assertIn("贪婪", payload["embeds"][0]["description"])
-        self.assertEqual(len(payload["embeds"][0]["fields"]), 4)
+        self.assertEqual(
+            payload["embeds"][0]["image"]["url"],
+            "attachment://fear-greed-card.png",
+        )
+        self.assertIn("贪婪 72.4", payload["content"])
+
+    def test_render_card_creates_png(self):
+        snapshot = parse_snapshot(SAMPLE)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "card.png"
+            render_card(snapshot, str(output))
+            self.assertTrue(output.exists())
+            with Image.open(output) as image:
+                self.assertEqual(image.format, "PNG")
+                self.assertEqual(image.size, (1200, 675))
 
     def test_commentary(self):
         snapshot = parse_snapshot(SAMPLE)
