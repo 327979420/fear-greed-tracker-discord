@@ -269,37 +269,37 @@ def render_card(snapshot: Snapshot, output_path: str = OUTPUT_PATH) -> str:
 
     meter_panel = (34, 128, 860, 744)
     rounded(draw, meter_panel, 26)
-    cx, cy = 447, 535
-    radius = 332
+    cx, cy = 447, 500
+    radius = 285
 
     def angle(score: float) -> float:
-        return 180 - score * 1.8
+        return 180 + score * 1.8
 
     zone_segments = [(0, 24, "extreme fear"), (25, 44, "fear"), (45, 55, "neutral"), (56, 75, "greed"), (76, 100, "extreme greed")]
     for low, high, key in zone_segments:
-        draw.arc((cx - radius, cy - radius, cx + radius, cy + radius), start=angle(high), end=angle(low), fill=COLORS[key], width=40)
+        draw.arc((cx - radius, cy - radius, cx + radius, cy + radius), start=angle(low), end=angle(high), fill=COLORS[key], width=40)
 
     for tick in range(0, 101, 5):
         a = math.radians(angle(tick))
-        r1, r2 = 272, 250 if tick % 25 == 0 else 258
-        draw.line((cx + math.cos(a) * r1, cy - math.sin(a) * r1, cx + math.cos(a) * r2, cy - math.sin(a) * r2), fill="#CBD5E1", width=2 if tick % 25 == 0 else 1)
+        r1, r2 = 235, 212 if tick % 25 == 0 else 220
+        draw.line((cx + math.cos(a) * r1, cy + math.sin(a) * r1, cx + math.cos(a) * r2, cy + math.sin(a) * r2), fill="#CBD5E1", width=2 if tick % 25 == 0 else 1)
         if tick % 25 == 0:
-            centered(draw, (cx + math.cos(a) * 220, cy - math.sin(a) * 220), str(tick), font(17), COLORS["text"])
+            centered(draw, (cx + math.cos(a) * 190, cy + math.sin(a) * 190), str(tick), font(17), COLORS["text"])
 
-    labels = [(142, 402, "extreme fear"), (254, 246, "fear"), (447, 174, "neutral"), (642, 246, "greed"), (754, 402, "extreme greed")]
+    labels = [(105, 390, "extreme fear"), (255, 225, "fear"), (447, 165, "neutral"), (640, 225, "greed"), (790, 390, "extreme greed")]
     for x, y, key in labels:
         label, score_range = ZONE_META[key]
         centered(draw, (x, y), label, font(21, True), COLORS[key])
         centered(draw, (x, y + 34), score_range, font(16), COLORS["text"])
 
     current_color = zone_color(snapshot.score)
-    draw.ellipse((cx - 226, cy - 226, cx + 226, cy + 226), fill="#FFFFFF", outline="#F1F5F9", width=2)
-    centered(draw, (cx, cy - 22), format_score(snapshot.score), font(108, True), current_color)
+    draw.ellipse((cx - 204, cy - 204, cx + 204, cy + 204), fill="#FFFFFF", outline="#F1F5F9", width=2)
+    centered(draw, (cx, cy - 22), format_score(snapshot.score), font(104, True), current_color)
     centered(draw, (cx, cy + 77), zone_label(snapshot.score), font(52, True), current_color)
     centered(draw, (cx, cy + 135), snapshot.rating.upper(), font(23), COLORS["subtle"])
 
     needle_angle = math.radians(angle(snapshot.score))
-    draw.line((cx - math.cos(needle_angle) * 20, cy + math.sin(needle_angle) * 20, cx + math.cos(needle_angle) * 246, cy - math.sin(needle_angle) * 246), fill=COLORS["text"], width=10)
+    draw.line((cx - math.cos(needle_angle) * 20, cy - math.sin(needle_angle) * 20, cx + math.cos(needle_angle) * 216, cy + math.sin(needle_angle) * 216), fill=COLORS["text"], width=10)
     draw.ellipse((cx - 15, cy - 15, cx + 15, cy + 15), fill=COLORS["text"])
 
     history_panel = (878, 128, 1566, 380)
