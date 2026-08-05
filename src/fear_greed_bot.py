@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""Generate a visual CNN Fear & Greed card and publish it to Discord."""
-
+"""Generate a live CNN Fear & Greed dashboard and publish it to Discord."""
 from __future__ import annotations
 
 import json
@@ -11,7 +10,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -19,47 +18,43 @@ from urllib.request import Request, urlopen
 
 from PIL import Image, ImageDraw, ImageFont
 
-DEFAULT_API_URL = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
-DEFAULT_TIMEOUT_SECONDS = 25
-DEFAULT_RETRIES = 3
-DEFAULT_IMAGE_PATH = "/tmp/fear-greed-card.png"
+API_URL = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
+OUTPUT_PATH = os.getenv("OUTPUT_IMAGE_PATH", "/tmp/fear-greed-card.png")
+TIMEOUT = 25
+RETRIES = 3
+BEIJING = timezone(timedelta(hours=8))
 
-RATING_ZH = {
-    "extreme fear": "极度恐慌",
-    "fear": "恐慌",
-    "neutral": "中性",
-    "greed": "贪婪",
-    "extreme greed": "极度贪婪",
+COLORS = {
+    "bg": "#F6F7F9",
+    "panel": "#FFFFFF",
+    "border": "#E5E7EB",
+    "text": "#111827",
+    "muted": "#4B5563",
+    "subtle": "#6B7280",
+    "extreme fear": "#EF4444",
+    "fear": "#F97316",
+    "neutral": "#9CA3AF",
+    "greed": "#22A447",
+    "extreme greed": "#15803D",
+    "extreme fear fill": "#FEE2E2",
+    "fear fill": "#FFEDD5",
+    "neutral fill": "#F3F4F6",
+    "greed fill": "#E4F6E8",
+    "extreme greed fill": "#DCFCE7",
 }
 
-RATING_EN = {
-    "extreme fear": "EXTREME FEAR",
-    "fear": "FEAR",
-    "neutral": "NEUTRAL",
-    "greed": "GREED",
-    "extreme greed": "EXTREME GREED",
-}
-
-PALETTE = {
-    "bg": "#070B14",
-    "panel": "#101827",
-    "panel_alt": "#131E30",
-    "line": "#25324A",
-    "text": "#F8FAFC",
-    "muted": "#94A3B8",
-    "subtle": "#64748B",
-    "red": "#EF4444",
-    "orange": "#F97316",
-    "yellow": "#FACC15",
-    "lime": "#84CC16",
-    "green": "#22C55E",
-    "blue": "#38BDF8",
+ZONE_META = {
+    "extreme fear": ("极度恐慌", "0–24"),
+    "fear": ("恐慌", "25–44"),
+    "neutral": ("中性", "45–55"),
+    "greed": ("贪婪", "56–75"),
+    "extreme greed": ("极度贪婪", "76–100"),
 }
 
 
 @dataclass(frozen=True)
 class HistoryPoint:
-    timestamp: float
+    when: datetime
     score: float
 
 
@@ -67,115 +62,42 @@ class HistoryPoint:
 class Snapshot:
     score: float
     rating: str
-    timestamp: str
+    timestamp: datetime
     previous_close: float | None
     previous_1_week: float | None
     previous_1_month: float | None
-    previous_1_year: float | None
-    history: tuple[HistoryPoint, ...] = ()
+    history: tuple[HistoryPoint, ...]
 
 
 def _number(value: Any) -> float | None:
-    if value is None or value == "":
-        return None
     try:
-        return float(value)
+        return None if value in (None, "") else float(value)
     except (TypeError, ValueError):
         return None
 
 
-def fetch_json(
-    url: str,
-    timeout: int = DEFAULT_TIMEOUT_SECONDS,
-    retries: int = DEFAULT_RETRIES,
-) -> dict[str, Any]:
-    """Fetch CNN JSON using browser-like headers and bounded retries."""
-    headers = {
-        "Accept": "application/json, text/plain, */*",
-        "Referer": "https://edition.cnn.com/markets/fear-and-greed",
-        "User-Agent": (
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
-        ),
-    }
-    last_error: Exception | None = None
-
-    for attempt in range(1, retries + 1):
-        try:
-            request = Request(url, headers=headers, method="GET")
-            with urlopen(request, timeout=timeout) as response:
-                body = response.read().decode("utf-8")
-            data = json.loads(body)
-            if not isinstance(data, dict):
-                raise ValueError("Fear & Greed API returned a non-object JSON response")
-            return data
-        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
-            last_error = exc
-            if attempt < retries:
-                time.sleep(2 ** (attempt - 1))
-
-    raise RuntimeError(
-        f"Unable to fetch Fear & Greed data after {retries} attempts: {last_error}"
-    )
-
-
-def _parse_history(payload: dict[str, Any]) -> tuple[HistoryPoint, ...]:
-    historical = payload.get("fear_and_greed_historical")
-    if not isinstance(historical, dict):
-        return ()
-    rows = historical.get("data")
-    if not isinstance(rows, list):
-        return ()
-
-    points: list[HistoryPoint] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        timestamp = _number(row.get("x"))
-        score = _number(row.get("y"))
-        if timestamp is None or score is None:
-            continue
-        points.append(HistoryPoint(timestamp=timestamp, score=max(0, min(100, score))))
-
-    points.sort(key=lambda point: point.timestamp)
-    return tuple(points[-30:])
-
-
-def parse_snapshot(payload: dict[str, Any]) -> Snapshot:
-    """Normalize CNN's current and historical Fear & Greed response."""
-    current = payload.get("fear_and_greed")
-    if not isinstance(current, dict):
-        raise ValueError("Missing 'fear_and_greed' object in API response")
-
-    score = _number(current.get("score"))
-    if score is None:
-        raise ValueError("Missing or invalid Fear & Greed score")
-
-    rating = str(current.get("rating") or classify_score(score)).strip().lower()
-    timestamp = str(current.get("timestamp") or datetime.now(timezone.utc).isoformat())
-
-    return Snapshot(
-        score=max(0, min(100, score)),
-        rating=rating,
-        timestamp=timestamp,
-        previous_close=_number(current.get("previous_close")),
-        previous_1_week=_number(current.get("previous_1_week")),
-        previous_1_month=_number(current.get("previous_1_month")),
-        previous_1_year=_number(current.get("previous_1_year")),
-        history=_parse_history(payload),
-    )
-
-
-def classify_score(score: float) -> str:
+def classify(score: float) -> str:
     if score <= 24:
         return "extreme fear"
     if score <= 44:
         return "fear"
     if score <= 55:
         return "neutral"
-    if score <= 74:
+    if score <= 75:
         return "greed"
     return "extreme greed"
+
+
+def zone_label(score: float | None) -> str:
+    return "暂无" if score is None else ZONE_META[classify(score)][0]
+
+
+def zone_color(score: float | None) -> str:
+    return COLORS["neutral"] if score is None else COLORS[classify(score)]
+
+
+def zone_fill(score: float | None) -> str:
+    return COLORS["neutral fill"] if score is None else COLORS[f"{classify(score)} fill"]
 
 
 def format_score(value: float | None) -> str:
@@ -187,478 +109,322 @@ def format_score(value: float | None) -> str:
 
 def change_text(current: float, previous: float | None) -> str:
     if previous is None:
-        return "暂无对比"
+        return "暂无"
     delta = current - previous
     if abs(delta) < 0.05:
         return "→ 0.0"
-    arrow = "↑" if delta > 0 else "↓"
-    return f"{arrow} {abs(delta):.1f}"
+    return f"{'↑' if delta > 0 else '↓'} {abs(delta):.1f}"
 
 
-def market_commentary(snapshot: Snapshot) -> str:
-    score = snapshot.score
-    previous = snapshot.previous_close
-    delta = score - previous if previous is not None else 0
-
-    if score <= 24:
-        base = "市场处于极度避险状态，波动风险较高。"
-    elif score <= 44:
-        base = "市场情绪偏谨慎，资金风险偏好仍然不足。"
-    elif score <= 55:
-        base = "市场情绪接近中性，多空暂未形成明显优势。"
-    elif score <= 74:
-        base = "市场风险偏好较强，但需留意追涨情绪升温。"
-    else:
-        base = "市场处于极度乐观状态，拥挤交易和回撤风险上升。"
-
-    if previous is None:
-        trend = ""
-    elif delta >= 8:
-        trend = "较上一交易日明显回暖。"
-    elif delta >= 3:
-        trend = "较上一交易日继续改善。"
-    elif delta <= -8:
-        trend = "较上一交易日快速降温。"
-    elif delta <= -3:
-        trend = "较上一交易日有所走弱。"
-    else:
-        trend = "较上一交易日变化不大。"
-
-    return f"{base}{trend}"
+def _parse_datetime(value: Any) -> datetime:
+    if isinstance(value, (int, float)):
+        number = float(value)
+        if number > 10_000_000_000:
+            number /= 1000
+        return datetime.fromtimestamp(number, tz=timezone.utc)
+    text = str(value or "").strip()
+    if text:
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            try:
+                number = float(text)
+                if number > 10_000_000_000:
+                    number /= 1000
+                return datetime.fromtimestamp(number, tz=timezone.utc)
+            except (ValueError, OSError, OverflowError):
+                pass
+    return datetime.now(timezone.utc)
 
 
-def score_color(score: float) -> str:
-    if score <= 24:
-        return PALETTE["red"]
-    if score <= 44:
-        return PALETTE["orange"]
-    if score <= 55:
-        return PALETTE["yellow"]
-    if score <= 74:
-        return PALETTE["lime"]
-    return PALETTE["green"]
+def _history(payload: dict[str, Any]) -> tuple[HistoryPoint, ...]:
+    historical = payload.get("fear_and_greed_historical")
+    rows: list[Any] = []
+    if isinstance(historical, dict):
+        for key in ("data", "history"):
+            if isinstance(historical.get(key), list):
+                rows = historical[key]
+                break
+    elif isinstance(historical, list):
+        rows = historical
+
+    points: list[HistoryPoint] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        score = None
+        for key in ("y", "score", "value"):
+            candidate = _number(row.get(key))
+            if candidate is not None:
+                score = candidate
+                break
+        raw_time = next((row.get(k) for k in ("x", "timestamp", "date") if row.get(k) is not None), None)
+        if score is not None and raw_time is not None:
+            points.append(HistoryPoint(_parse_datetime(raw_time), score))
+    points.sort(key=lambda point: point.when)
+    return tuple(points[-30:])
 
 
-def embed_color(score: float) -> int:
-    return int(score_color(score).lstrip("#"), 16)
+def fetch_json(url: str = API_URL) -> dict[str, Any]:
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://edition.cnn.com/markets/fear-and-greed",
+        "User-Agent": "Mozilla/5.0 Chrome/126.0",
+    }
+    last_error: Exception | None = None
+    for attempt in range(RETRIES):
+        try:
+            request = Request(url, headers=headers, method="GET")
+            with urlopen(request, timeout=TIMEOUT) as response:
+                result = json.loads(response.read().decode("utf-8"))
+            if not isinstance(result, dict):
+                raise ValueError("CNN endpoint returned an unexpected response")
+            return result
+        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
+            last_error = exc
+            if attempt < RETRIES - 1:
+                time.sleep(2**attempt)
+    raise RuntimeError(f"Unable to fetch CNN Fear & Greed data: {last_error}")
 
 
-def normalize_timestamp(value: str) -> str:
-    """Return an ISO-8601 timestamp accepted by Discord."""
-    try:
-        normalized = value.replace("Z", "+00:00")
-        parsed = datetime.fromisoformat(normalized)
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc).isoformat()
-    except ValueError:
-        return datetime.now(timezone.utc).isoformat()
+def parse_snapshot(payload: dict[str, Any]) -> Snapshot:
+    current = payload.get("fear_and_greed")
+    if not isinstance(current, dict):
+        raise ValueError("Missing fear_and_greed data")
+    score = _number(current.get("score"))
+    if score is None:
+        raise ValueError("Missing current score")
+    rating = str(current.get("rating") or classify(score)).strip().lower()
+    if rating not in ZONE_META:
+        rating = classify(score)
+    timestamp = _parse_datetime(current.get("timestamp"))
+    history = list(_history(payload))
+    if not history or abs(history[-1].score - score) > 0.05:
+        history.append(HistoryPoint(timestamp, score))
+    return Snapshot(
+        score=score,
+        rating=rating,
+        timestamp=timestamp,
+        previous_close=_number(current.get("previous_close")),
+        previous_1_week=_number(current.get("previous_1_week")),
+        previous_1_month=_number(current.get("previous_1_month")),
+        history=tuple(history[-30:]),
+    )
 
 
-def _display_date(value: str) -> str:
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        return parsed.strftime("%Y.%m.%d")
-    except ValueError:
-        return datetime.now(timezone.utc).strftime("%Y.%m.%d")
+def objective_comment(snapshot: Snapshot) -> str:
+    label = ZONE_META[classify(snapshot.score)][0]
+    if snapshot.score >= 56:
+        return f"市场情绪处于{label}区间，风险偏好较高。"
+    if snapshot.score <= 44:
+        return f"市场情绪处于{label}区间，风险偏好较低。"
+    return "市场情绪处于中性区间，风险偏好相对均衡。"
 
 
-def _font_path(bold: bool = False) -> str | None:
-    env_name = "FONT_BOLD" if bold else "FONT_REGULAR"
-    configured = os.getenv(env_name, "").strip()
+def _font_path(bold: bool) -> str | None:
+    configured = os.getenv("FONT_BOLD" if bold else "FONT_REGULAR", "").strip()
     candidates = [configured] if configured else []
-    if bold:
-        candidates += [
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.otf",
-            "/System/Library/Fonts/PingFang.ttc",
-            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-        ]
-    else:
-        candidates += [
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.otf",
-            "/System/Library/Fonts/PingFang.ttc",
-            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-        ]
     candidates += [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-        if bold
-        else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc" if bold else "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.otf" if bold else "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.otf",
+        "/System/Library/Fonts/PingFang.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     ]
-    return next((path for path in candidates if path and Path(path).exists()), None)
+    return next((item for item in candidates if item and Path(item).exists()), None)
 
 
-def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+def font(size: int, bold: bool = False) -> ImageFont.ImageFont:
     path = _font_path(bold)
-    if path:
-        return ImageFont.truetype(path, size=size)
-    return ImageFont.load_default()
+    return ImageFont.truetype(path, size) if path else ImageFont.load_default()
 
 
-def _rounded_panel(
-    draw: ImageDraw.ImageDraw,
-    box: tuple[int, int, int, int],
-    radius: int = 24,
-    fill: str = PALETTE["panel"],
-    outline: str | None = PALETTE["line"],
-    width: int = 1,
-) -> None:
+def rounded(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], radius: int = 24, fill: str = COLORS["panel"], outline: str = COLORS["border"], width: int = 2) -> None:
     draw.rounded_rectangle(box, radius=radius, fill=fill, outline=outline, width=width)
 
 
-def _fit_text(
-    draw: ImageDraw.ImageDraw,
-    text: str,
-    font: ImageFont.ImageFont,
-    max_width: int,
-) -> list[str]:
-    lines: list[str] = []
-    current = ""
-    for char in text:
-        candidate = current + char
-        bbox = draw.textbbox((0, 0), candidate, font=font)
-        if current and bbox[2] - bbox[0] > max_width:
-            lines.append(current)
-            current = char
-        else:
-            current = candidate
-    if current:
-        lines.append(current)
-    return lines
+def centered(draw: ImageDraw.ImageDraw, center: tuple[float, float], text: str, text_font: ImageFont.ImageFont, fill: str) -> None:
+    box = draw.textbbox((0, 0), text, font=text_font)
+    draw.text((center[0] - (box[2] - box[0]) / 2, center[1] - (box[3] - box[1]) / 2), text, font=text_font, fill=fill)
 
 
-def _history_values(snapshot: Snapshot) -> list[float]:
-    if snapshot.history:
-        values = [point.score for point in snapshot.history]
-        if abs(values[-1] - snapshot.score) > 0.05:
-            values.append(snapshot.score)
-        return values[-30:]
-    fallback = [
-        snapshot.previous_1_month,
-        snapshot.previous_1_week,
-        snapshot.previous_close,
-        snapshot.score,
-    ]
-    return [float(value) for value in fallback if value is not None]
+def pill(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], text: str, score: float | None) -> None:
+    draw.rounded_rectangle(box, radius=(box[3] - box[1]) // 2, fill=zone_fill(score))
+    centered(draw, ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2), text, font(19, True), zone_color(score))
 
 
-def render_card(snapshot: Snapshot, output_path: str = DEFAULT_IMAGE_PATH) -> str:
-    """Render a 16:9 PNG market-sentiment card suitable for Discord."""
-    width, height = 1200, 675
-    image = Image.new("RGB", (width, height), PALETTE["bg"])
+def render_card(snapshot: Snapshot, output_path: str = OUTPUT_PATH) -> str:
+    width, height = 1600, 900
+    image = Image.new("RGB", (width, height), COLORS["bg"])
     draw = ImageDraw.Draw(image)
 
-    title_font = _font(40, bold=True)
-    kicker_font = _font(18, bold=True)
-    label_font = _font(20, bold=True)
-    small_font = _font(17)
-    tiny_font = _font(14)
-    score_font = _font(94, bold=True)
-    status_font = _font(30, bold=True)
-    compare_font = _font(32, bold=True)
-    commentary_font = _font(20)
+    draw.text((36, 24), "美股 Fear & Greed 每日播报", font=font(52, True), fill=COLORS["text"])
+    draw.text((38, 92), "基于 CNN Fear & Greed Index", font=font(23), fill=COLORS["muted"])
+    updated = snapshot.timestamp.astimezone(BEIJING).strftime("%Y年%m月%d日 %H:%M（北京时间）")
+    updated_box = draw.textbbox((0, 0), updated, font=font(22))
+    draw.text((1562 - (updated_box[2] - updated_box[0]), 38), updated, font=font(22), fill=COLORS["text"])
+    source = "数据来源：CNN Business"
+    source_box = draw.textbbox((0, 0), source, font=font(21))
+    draw.text((1562 - (source_box[2] - source_box[0]), 84), source, font=font(21), fill=COLORS["subtle"])
 
-    accent = score_color(snapshot.score)
-    rating_zh = RATING_ZH.get(snapshot.rating, snapshot.rating.title())
-    rating_en = RATING_EN.get(snapshot.rating, snapshot.rating.upper())
+    meter_panel = (34, 128, 860, 744)
+    rounded(draw, meter_panel, 26)
+    cx, cy = 447, 535
+    radius = 332
 
-    draw.text((54, 35), "MARKET SENTIMENT", font=kicker_font, fill=PALETTE["blue"])
-    draw.text((54, 65), "美股 Fear & Greed 每日播报", font=title_font, fill=PALETTE["text"])
-    date_text = _display_date(snapshot.timestamp)
-    date_bbox = draw.textbbox((0, 0), date_text, font=small_font)
-    draw.text(
-        (1145 - (date_bbox[2] - date_bbox[0]), 47),
-        date_text,
-        font=small_font,
-        fill=PALETTE["muted"],
-    )
-    draw.line((54, 122, 1146, 122), fill=PALETTE["line"], width=1)
+    def angle(score: float) -> float:
+        return 180 - score * 1.8
 
-    _rounded_panel(draw, (44, 145, 515, 590), radius=28)
-    cx, cy, radius = 280, 385, 178
-    segments = [
-        (0, 24, PALETTE["red"]),
-        (24, 44, PALETTE["orange"]),
-        (44, 56, PALETTE["yellow"]),
-        (56, 75, PALETTE["lime"]),
-        (75, 100, PALETTE["green"]),
-    ]
-    arc_box = (cx - radius, cy - radius, cx + radius, cy + radius)
-    for low, high, color in segments:
-        start = 180 + low * 1.8
-        end = 180 + high * 1.8
-        draw.arc(arc_box, start=start, end=end, fill=color, width=30)
+    zone_segments = [(0, 24, "extreme fear"), (25, 44, "fear"), (45, 55, "neutral"), (56, 75, "greed"), (76, 100, "extreme greed")]
+    for low, high, key in zone_segments:
+        draw.arc((cx - radius, cy - radius, cx + radius, cy + radius), start=angle(high), end=angle(low), fill=COLORS[key], width=40)
 
-    marker_angle = math.radians(180 + snapshot.score * 1.8)
-    mx = cx + math.cos(marker_angle) * radius
-    my = cy + math.sin(marker_angle) * radius
-    draw.ellipse(
-        (mx - 10, my - 10, mx + 10, my + 10),
-        fill=PALETTE["text"],
-        outline=accent,
-        width=4,
-    )
+    for tick in range(0, 101, 5):
+        a = math.radians(angle(tick))
+        r1, r2 = 272, 250 if tick % 25 == 0 else 258
+        draw.line((cx + math.cos(a) * r1, cy - math.sin(a) * r1, cx + math.cos(a) * r2, cy - math.sin(a) * r2), fill="#CBD5E1", width=2 if tick % 25 == 0 else 1)
+        if tick % 25 == 0:
+            centered(draw, (cx + math.cos(a) * 220, cy - math.sin(a) * 220), str(tick), font(17), COLORS["text"])
 
-    score_text = format_score(snapshot.score)
-    score_bbox = draw.textbbox((0, 0), score_text, font=score_font)
-    draw.text(
-        (cx - (score_bbox[2] - score_bbox[0]) / 2, 285),
-        score_text,
-        font=score_font,
-        fill=PALETTE["text"],
-    )
-    draw.text((cx + 86, 350), "/100", font=small_font, fill=PALETTE["muted"])
+    labels = [(142, 402, "extreme fear"), (254, 246, "fear"), (447, 174, "neutral"), (642, 246, "greed"), (754, 402, "extreme greed")]
+    for x, y, key in labels:
+        label, score_range = ZONE_META[key]
+        centered(draw, (x, y), label, font(21, True), COLORS[key])
+        centered(draw, (x, y + 34), score_range, font(16), COLORS["text"])
 
-    status_bbox = draw.textbbox((0, 0), rating_zh, font=status_font)
-    draw.text(
-        (cx - (status_bbox[2] - status_bbox[0]) / 2, 417),
-        rating_zh,
-        font=status_font,
-        fill=accent,
-    )
-    en_bbox = draw.textbbox((0, 0), rating_en, font=tiny_font)
-    draw.text(
-        (cx - (en_bbox[2] - en_bbox[0]) / 2, 462),
-        rating_en,
-        font=tiny_font,
-        fill=PALETTE["subtle"],
-    )
+    current_color = zone_color(snapshot.score)
+    draw.ellipse((cx - 226, cy - 226, cx + 226, cy + 226), fill="#FFFFFF", outline="#F1F5F9", width=2)
+    centered(draw, (cx, cy - 22), format_score(snapshot.score), font(108, True), current_color)
+    centered(draw, (cx, cy + 77), zone_label(snapshot.score), font(52, True), current_color)
+    centered(draw, (cx, cy + 135), snapshot.rating.upper(), font(23), COLORS["subtle"])
 
-    comparison_items = [
-        ("上一交易日", snapshot.previous_close),
-        ("一周前", snapshot.previous_1_week),
-        ("一个月前", snapshot.previous_1_month),
-    ]
-    x_positions = [545, 748, 951]
-    for (label, value), x in zip(comparison_items, x_positions):
-        _rounded_panel(
-            draw,
-            (x, 145, x + 182, 255),
-            radius=20,
-            fill=PALETTE["panel_alt"],
-        )
-        draw.text((x + 18, 163), label, font=small_font, fill=PALETTE["muted"])
-        draw.text(
-            (x + 18, 193),
-            format_score(value),
-            font=compare_font,
-            fill=PALETTE["text"],
-        )
-        delta = change_text(snapshot.score, value)
-        delta_color = PALETTE["muted"]
-        if delta.startswith("↑"):
-            delta_color = PALETTE["green"]
-        elif delta.startswith("↓"):
-            delta_color = PALETTE["red"]
-        delta_bbox = draw.textbbox((0, 0), delta, font=small_font)
-        draw.text(
-            (x + 164 - (delta_bbox[2] - delta_bbox[0]), 205),
-            delta,
-            font=small_font,
-            fill=delta_color,
-        )
+    needle_angle = math.radians(angle(snapshot.score))
+    draw.line((cx - math.cos(needle_angle) * 20, cy + math.sin(needle_angle) * 20, cx + math.cos(needle_angle) * 246, cy - math.sin(needle_angle) * 246), fill=COLORS["text"], width=10)
+    draw.ellipse((cx - 15, cy - 15, cx + 15, cy + 15), fill=COLORS["text"])
 
-    chart_box = (545, 278, 1133, 455)
-    _rounded_panel(draw, chart_box, radius=22, fill=PALETTE["panel_alt"])
-    draw.text(
-        (565, 295),
-        "近30个交易日情绪趋势",
-        font=label_font,
-        fill=PALETTE["text"],
-    )
-    values = _history_values(snapshot)
-    graph_left, graph_top, graph_right, graph_bottom = 567, 342, 1110, 426
-    for score_line in (25, 50, 75):
-        y = graph_bottom - (score_line / 100) * (graph_bottom - graph_top)
-        draw.line((graph_left, y, graph_right, y), fill=PALETTE["line"], width=1)
+    history_panel = (878, 128, 1566, 380)
+    rounded(draw, history_panel, 26)
+    draw.text((902, 152), "历史对比", font=font(27, True), fill=COLORS["text"])
+    comparisons = [("上一交易日", snapshot.previous_close), ("一周前", snapshot.previous_1_week), ("一个月前", snapshot.previous_1_month)]
+    for index, (label, value) in enumerate(comparisons):
+        x = 902 + index * 216
+        y = 198
+        rounded(draw, (x, y, x + 198, y + 154), 20, "#FBFBFC")
+        centered(draw, (x + 99, y + 28), label, font(19), COLORS["muted"])
+        centered(draw, (x + 99, y + 76), format_score(value), font(42, True), zone_color(value))
+        pill(draw, (x + 22, y + 108, x + 118, y + 140), zone_label(value), value)
+        change = change_text(snapshot.score, value)
+        change_color = COLORS["greed"] if change.startswith("↑") else COLORS["extreme fear"] if change.startswith("↓") else COLORS["subtle"]
+        draw.text((x + 128, y + 114), change, font=font(18, True), fill=change_color)
 
-    if len(values) >= 2:
-        coords = []
-        for index, value in enumerate(values):
-            x = graph_left + (index / (len(values) - 1)) * (graph_right - graph_left)
-            y = graph_bottom - (
-                max(0, min(100, value)) / 100
-            ) * (graph_bottom - graph_top)
-            coords.append((x, y))
-        draw.line(coords, fill=accent, width=4, joint="curve")
-        for point in (coords[0], coords[-1]):
-            draw.ellipse(
-                (point[0] - 5, point[1] - 5, point[0] + 5, point[1] + 5),
-                fill=PALETTE["text"],
-                outline=accent,
-                width=3,
-            )
+    trend_panel = (878, 398, 1566, 744)
+    rounded(draw, trend_panel, 26)
+    draw.text((902, 422), "近30个交易日走势", font=font(27, True), fill=COLORS["text"])
+    left, top, right, bottom = 940, 482, 1470, 689
+    bands = [(0, 24, "extreme fear"), (25, 44, "fear"), (45, 55, "neutral"), (56, 75, "greed"), (76, 100, "extreme greed")]
+    for low, high, key in bands:
+        y1 = bottom - high / 100 * (bottom - top)
+        y2 = bottom - low / 100 * (bottom - top)
+        draw.rectangle((left, y1, right, y2), fill=COLORS[f"{key} fill"])
+    for tick in (0, 25, 50, 75, 100):
+        y = bottom - tick / 100 * (bottom - top)
+        draw.line((left, y, right, y), fill="#D1D5DB", width=1)
+        centered(draw, (left - 22, y), str(tick), font(14), COLORS["muted"])
+
+    points = list(snapshot.history)
+    if len(points) >= 2:
+        coordinates: list[tuple[float, float]] = []
+        for index, point in enumerate(points):
+            x = left + index / (len(points) - 1) * (right - left)
+            y = bottom - max(0, min(100, point.score)) / 100 * (bottom - top)
+            coordinates.append((x, y))
+        draw.line(coordinates, fill="#159447", width=4)
+        for x, y in coordinates:
+            draw.ellipse((x - 3, y - 3, x + 3, y + 3), fill="#FFFFFF", outline="#159447", width=2)
+        x, y = coordinates[-1]
+        draw.ellipse((x - 8, y - 8, x + 8, y + 8), fill="#FFFFFF", outline="#159447", width=4)
+        label_x = min(x - 10, right - 104)
+        label_y = max(top + 8, y - 58)
+        rounded(draw, (int(label_x), int(label_y), int(label_x + 100), int(label_y + 48)), 13, "#FFFFFF")
+        centered(draw, (label_x + 50, label_y + 24), format_score(snapshot.score), font(23, True), current_color)
+
+        label_count = min(6, len(points))
+        for index in range(label_count):
+            point_index = round(index * (len(points) - 1) / max(1, label_count - 1))
+            point = points[point_index]
+            x = left + point_index / (len(points) - 1) * (right - left)
+            centered(draw, (x, bottom + 20), point.when.astimezone(BEIJING).strftime("%m-%d"), font(13), COLORS["muted"])
     else:
-        draw.text(
-            (graph_left, graph_top + 25),
-            "历史数据暂不可用",
-            font=small_font,
-            fill=PALETTE["muted"],
-        )
+        centered(draw, ((left + right) / 2, (top + bottom) / 2), "历史数据暂不可用", font(18), COLORS["muted"])
 
-    draw.text((graph_left, 432), "30D AGO", font=tiny_font, fill=PALETTE["subtle"])
-    today_bbox = draw.textbbox((0, 0), "TODAY", font=tiny_font)
-    draw.text(
-        (graph_right - (today_bbox[2] - today_bbox[0]), 432),
-        "TODAY",
-        font=tiny_font,
-        fill=PALETTE["subtle"],
-    )
+    right_labels = [("极度贪婪", "76–100", "extreme greed"), ("贪婪", "56–75", "greed"), ("中性", "45–55", "neutral"), ("恐慌", "25–44", "fear"), ("极度恐慌", "0–24", "extreme fear")]
+    y = 462
+    for name, score_range, key in right_labels:
+        draw.text((1490, y), name, font=font(15, True), fill=COLORS[key])
+        draw.text((1490, y + 22), score_range, font=font(13), fill=COLORS["muted"])
+        y += 52
 
-    _rounded_panel(draw, (545, 478, 1133, 590), radius=22, fill=PALETTE["panel_alt"])
-    draw.text((565, 497), "市场解读", font=label_font, fill=PALETTE["blue"])
-    lines = _fit_text(draw, market_commentary(snapshot), commentary_font, 535)
-    for line_no, line in enumerate(lines[:2]):
-        draw.text(
-            (565, 532 + line_no * 28),
-            line,
-            font=commentary_font,
-            fill=PALETTE["text"],
-        )
+    comment_panel = (34, 764, 1566, 854)
+    rounded(draw, comment_panel, 22)
+    draw.text((58, 787), "市场解读", font=font(26, True), fill=COLORS["text"])
+    draw.text((58, 823), objective_comment(snapshot), font=font(23), fill=COLORS["muted"])
+    draw.text((38, 872), "免责声明：本内容仅供参考，不构成任何投资建议。市场有风险，投资需谨慎。", font=font(14), fill=COLORS["subtle"])
 
-    draw.text(
-        (54, 625),
-        "DATA: CNN FEAR & GREED INDEX",
-        font=tiny_font,
-        fill=PALETTE["subtle"],
-    )
-    footer = "仅供市场情绪参考，不构成投资建议"
-    footer_bbox = draw.textbbox((0, 0), footer, font=tiny_font)
-    draw.text(
-        (1146 - (footer_bbox[2] - footer_bbox[0]), 625),
-        footer,
-        font=tiny_font,
-        fill=PALETTE["subtle"],
-    )
-
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    image.save(output_path, format="PNG", optimize=True)
-    return output_path
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    image.save(output, "PNG", optimize=True)
+    return str(output)
 
 
-def build_discord_payload(snapshot: Snapshot, with_image: bool = True) -> dict[str, Any]:
-    rating_zh = RATING_ZH.get(snapshot.rating, snapshot.rating.title())
-    title = os.getenv("BROADCAST_TITLE", "美股 Fear & Greed 每日播报")
-    role_mention = os.getenv("DISCORD_ROLE_MENTION", "").strip()
-    daily_change = change_text(snapshot.score, snapshot.previous_close)
-
-    content_lines = []
-    if role_mention:
-        content_lines.append(role_mention)
-    content_lines.append(
-        f"**{title}｜{rating_zh} {format_score(snapshot.score)}**  "
-        f"（较上一交易日 {daily_change}）"
-    )
-
-    embed: dict[str, Any] = {
-        "description": market_commentary(snapshot),
-        "color": embed_color(snapshot.score),
-        "footer": {"text": "CNN Fear & Greed Index｜仅供参考，不构成投资建议"},
-        "timestamp": normalize_timestamp(snapshot.timestamp),
-    }
-    if with_image:
-        embed["image"] = {"url": "attachment://fear-greed-card.png"}
-
-    return {
-        "username": os.getenv("WEBHOOK_USERNAME", "市场情绪播报"),
-        "content": "\n".join(content_lines),
-        "allowed_mentions": {"parse": ["roles"] if role_mention else []},
-        "embeds": [embed],
-    }
+def build_payload(snapshot: Snapshot) -> dict[str, Any]:
+    caption = f"美股 Fear & Greed 每日播报｜{zone_label(snapshot.score)} {format_score(snapshot.score)}"
+    if snapshot.previous_close is not None:
+        caption += f"（较上一交易日 {change_text(snapshot.score, snapshot.previous_close)}）"
+    return {"content": caption, "username": os.getenv("WEBHOOK_USERNAME", "市场情绪播报"), "allowed_mentions": {"parse": []}}
 
 
-def _multipart_body(payload: dict[str, Any], image_path: str) -> tuple[bytes, str]:
-    boundary = f"----FearGreedBoundary{uuid.uuid4().hex}"
-    image_name = "fear-greed-card.png"
-    image_bytes = Path(image_path).read_bytes()
-    content_type = mimetypes.guess_type(image_name)[0] or "application/octet-stream"
-
-    chunks: list[bytes] = []
-
-    def add(value: str | bytes) -> None:
-        chunks.append(value.encode("utf-8") if isinstance(value, str) else value)
-
-    add(f"--{boundary}\r\n")
-    add('Content-Disposition: form-data; name="payload_json"\r\n')
-    add("Content-Type: application/json; charset=utf-8\r\n\r\n")
-    add(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
-    add("\r\n")
-
-    add(f"--{boundary}\r\n")
-    add(
-        'Content-Disposition: form-data; name="files[0]"; '
-        f'filename="{image_name}"\r\n'
-    )
-    add(f"Content-Type: {content_type}\r\n\r\n")
-    add(image_bytes)
-    add("\r\n")
-    add(f"--{boundary}--\r\n")
-
-    return b"".join(chunks), boundary
+def multipart(payload: dict[str, Any], image_path: str) -> tuple[bytes, str]:
+    boundary = f"----feargreed{uuid.uuid4().hex}"
+    filename = Path(image_path).name
+    mime = mimetypes.guess_type(filename)[0] or "image/png"
+    pieces = [
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"payload_json\"\r\n\r\n{json.dumps(payload, ensure_ascii=False)}\r\n".encode("utf-8"),
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"files[0]\"; filename=\"{filename}\"\r\nContent-Type: {mime}\r\n\r\n".encode("utf-8"),
+        Path(image_path).read_bytes(),
+        f"\r\n--{boundary}--\r\n".encode("utf-8"),
+    ]
+    return b"".join(pieces), boundary
 
 
-def post_webhook(
-    url: str,
-    payload: dict[str, Any],
-    image_path: str | None = None,
-    timeout: int = DEFAULT_TIMEOUT_SECONDS,
-) -> None:
-    if image_path:
-        body, boundary = _multipart_body(payload, image_path)
-        content_type = f"multipart/form-data; boundary={boundary}"
-    else:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        content_type = "application/json"
-
-    request = Request(
-        url,
-        data=body,
-        headers={
-            "Content-Type": content_type,
-            "User-Agent": "fear-greed-discord/2.0",
-        },
-        method="POST",
-    )
+def post_webhook(url: str, payload: dict[str, Any], image_path: str) -> None:
+    body, boundary = multipart(payload, image_path)
+    request = Request(url, data=body, headers={"Content-Type": f"multipart/form-data; boundary={boundary}", "User-Agent": "fear-greed-discord/3.0"}, method="POST")
     try:
-        with urlopen(request, timeout=timeout) as response:
-            status = getattr(response, "status", 204)
-            if status not in (200, 204):
-                raise RuntimeError(f"Discord webhook returned HTTP {status}")
+        with urlopen(request, timeout=TIMEOUT) as response:
+            if getattr(response, "status", 204) not in (200, 204):
+                raise RuntimeError(f"Discord webhook returned HTTP {response.status}")
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(
-            f"Discord webhook returned HTTP {exc.code}: {detail}"
-        ) from exc
+        raise RuntimeError(f"Discord webhook returned HTTP {exc.code}: {detail}") from exc
     except URLError as exc:
         raise RuntimeError(f"Unable to reach Discord webhook: {exc.reason}") from exc
 
 
 def main() -> int:
-    api_url = os.getenv("FNG_API_URL", DEFAULT_API_URL)
-    dry_run = os.getenv("DRY_RUN", "").strip().lower() in {"1", "true", "yes"}
-    image_path = os.getenv("OUTPUT_IMAGE_PATH", DEFAULT_IMAGE_PATH)
-
+    dry_run = os.getenv("DRY_RUN", "").lower() in {"1", "true", "yes"}
     try:
-        raw = fetch_json(api_url)
-        snapshot = parse_snapshot(raw)
-        render_card(snapshot, image_path)
-        payload = build_discord_payload(snapshot, with_image=True)
-
+        snapshot = parse_snapshot(fetch_json(os.getenv("FNG_API_URL", API_URL)))
+        image_path = render_card(snapshot, os.getenv("OUTPUT_IMAGE_PATH", OUTPUT_PATH))
+        payload = build_payload(snapshot)
         if dry_run:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
-            print(f"Preview image created: {image_path}")
+            print(f"Generated image: {image_path}")
             return 0
-
-        webhook_url = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
-        if not webhook_url:
+        webhook = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
+        if not webhook:
             raise RuntimeError("DISCORD_WEBHOOK_URL is not configured")
-
-        post_webhook(webhook_url, payload, image_path=image_path)
-        print(
-            f"Visual broadcast sent: score={snapshot.score:.1f}, "
-            f"rating={snapshot.rating}, image={image_path}"
-        )
+        post_webhook(webhook, payload, image_path)
+        print(f"Broadcast sent: score={snapshot.score:.1f}, rating={snapshot.rating}")
         return 0
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
