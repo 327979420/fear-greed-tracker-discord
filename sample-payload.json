@@ -1,0 +1,20 @@
+{
+  "username": "市场情绪播报",
+  "content": null,
+  "allowed_mentions": {"parse": []},
+  "embeds": [
+    {
+      "title": "📊 美股 Fear & Greed 每日播报",
+      "description": "## 72.4 / 100\n**当前状态：贪婪**",
+      "color": 4431943,
+      "fields": [
+        {"name": "上一交易日", "value": "68  ·  ↑ 4.4", "inline": true},
+        {"name": "一周前", "value": "61.2  ·  ↑ 11.2", "inline": true},
+        {"name": "一个月前", "value": "55  ·  ↑ 17.4", "inline": true},
+        {"name": "市场解读", "value": "市场风险偏好较强，但需要留意追涨情绪继续升温。 较上一交易日继续改善。", "inline": false}
+      ],
+      "footer": {"text": "数据来源：CNN Fear & Greed Index｜仅供市场情绪参考，不构成投资建议"},
+      "timestamp": "2026-08-05T01:30:00+00:00"
+    }
+  ]
+}
