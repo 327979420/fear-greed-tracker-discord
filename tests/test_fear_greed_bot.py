@@ -60,7 +60,7 @@ class FearGreedBotTests(unittest.TestCase):
     def test_payload_is_minimal(self):
         snapshot = parse_snapshot(SAMPLE)
         payload = build_payload(snapshot)
-        self.assertEqual(payload["content"], "美股情绪播报：贪婪区间58.2")
+        self.assertEqual(payload["content"], "今日落入‘贪婪’区间：58.2")
 
     def test_marker_does_not_cross_center(self):
         x1, y1, x2, y2 = marker_segment((520, 520), 58.2)

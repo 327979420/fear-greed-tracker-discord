@@ -390,7 +390,7 @@ def render_card(snapshot: Snapshot, output_path: str = OUTPUT_PATH) -> str:
 
 def build_payload(snapshot: Snapshot) -> dict[str, Any]:
     return {
-        "content": f"美股情绪播报：{zone_label(snapshot.score)}区间{format_score(snapshot.score)}",
+        "content": f"今日落入‘{zone_label(snapshot.score)}’区间：{format_score(snapshot.score)}",
         "username": os.getenv("WEBHOOK_USERNAME", "市场情绪播报"),
         "allowed_mentions": {"parse": []},
     }
