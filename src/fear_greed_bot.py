@@ -286,7 +286,7 @@ def render_card(snapshot: Snapshot, output_path: str = OUTPUT_PATH) -> str:
 
     meter_panel = (34, 128, 1052, 850)
     rounded(draw, meter_panel, 28)
-    cx, cy = 520, 520
+    cx, cy = 520, 560
     radius = 332
 
     segments = [(0, 24, "extreme fear"), (25, 44, "fear"), (45, 55, "neutral"), (56, 75, "greed"), (76, 100, "extreme greed")]
@@ -318,10 +318,10 @@ def render_card(snapshot: Snapshot, output_path: str = OUTPUT_PATH) -> str:
     draw.ellipse((marker[0] - 10, marker[1] - 10, marker[0] + 10, marker[1] + 10), fill="#FFFFFF", outline=COLORS["text"], width=4)
 
     current_color = zone_color(snapshot.score)
-    centered(draw, (cx, 392), "当前指数", font(21, True), COLORS["subtle"])
-    centered(draw, (cx, 500), format_score(snapshot.score), font(136, True), current_color)
-    centered(draw, (cx, 640), zone_label(snapshot.score), font(58, True), current_color)
-    centered(draw, (cx, 700), snapshot.rating.upper(), font(24), COLORS["subtle"])
+    centered(draw, (cx, 430), "当前指数", font(21, True), COLORS["subtle"])
+    centered(draw, (cx, 548), format_score(snapshot.score), font(136, True), current_color)
+    centered(draw, (cx, 682), zone_label(snapshot.score), font(58, True), current_color)
+    centered(draw, (cx, 738), snapshot.rating.upper(), font(24), COLORS["subtle"])
 
     history_panel = (1072, 128, 1566, 378)
     rounded(draw, history_panel, 26)
