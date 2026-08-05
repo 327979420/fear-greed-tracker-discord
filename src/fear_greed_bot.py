@@ -304,8 +304,8 @@ def render_card(snapshot: Snapshot, output_path: str = OUTPUT_PATH) -> str:
             fill="#CBD5E1",
             width=2 if tick % 25 == 0 else 1,
         )
-        if tick % 25 == 0:
-            centered(draw, (cx + math.cos(a) * 232, cy + math.sin(a) * 232), str(tick), font(16), COLORS["text"])
+        if tick in (0, 100):
+            centered(draw, (cx + math.cos(a) * 242, cy + math.sin(a) * 242), str(tick), font(16), COLORS["text"])
 
     labels = [(132, 430, "extreme fear"), (292, 220, "fear"), (520, 150, "neutral"), (748, 220, "greed"), (908, 430, "extreme greed")]
     for x, y, key in labels:
@@ -322,10 +322,6 @@ def render_card(snapshot: Snapshot, output_path: str = OUTPUT_PATH) -> str:
     centered(draw, (cx, 500), format_score(snapshot.score), font(136, True), current_color)
     centered(draw, (cx, 640), zone_label(snapshot.score), font(58, True), current_color)
     centered(draw, (cx, 700), snapshot.rating.upper(), font(24), COLORS["subtle"])
-
-    delta_text = change_text(snapshot.score, snapshot.previous_close)
-    delta_color = COLORS["greed"] if delta_text.startswith("↑") else COLORS["extreme fear"] if delta_text.startswith("↓") else COLORS["subtle"]
-    centered(draw, (cx, 752), f"较上一交易日 {delta_text}", font(18, True), delta_color)
 
     history_panel = (1072, 128, 1566, 378)
     rounded(draw, history_panel, 26)
