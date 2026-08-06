@@ -8,12 +8,20 @@ on:
         required: false
         default: false
         type: boolean
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/daily-fear-greed.yml"
   schedule:
-    # 00:30 UTC = 08:30 China Standard Time.
-    - cron: "30 0 * * *"
+    # Staggered fallbacks around 08:30 China Standard Time.
+    # GitHub may delay or drop individual scheduled events.
+    - cron: "27 0 * * *"
+    - cron: "42 0 * * *"
+    - cron: "57 0 * * *"
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: daily-fear-greed-broadcast
@@ -26,29 +34,75 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check daily delivery state
+        id: guard
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DRY_RUN_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+        run: |
+          TODAY="$(TZ=Asia/Shanghai date +%F)"
+          LAST_SENT="$(cat .state/last_sent_date.txt 2>/dev/null || true)"
+          SHOULD_SEND=true
+
+          if [[ "$EVENT_NAME" == "schedule" || "$EVENT_NAME" == "push" ]]; then
+            if [[ "$LAST_SENT" == "$TODAY" ]]; then
+              SHOULD_SEND=false
+            fi
+          fi
+
+          echo "today=$TODAY" >> "$GITHUB_OUTPUT"
+          echo "should_send=$SHOULD_SEND" >> "$GITHUB_OUTPUT"
+          echo "dry_run=$DRY_RUN_INPUT" >> "$GITHUB_OUTPUT"
+          echo "event=$EVENT_NAME today=$TODAY last_sent=$LAST_SENT should_send=$SHOULD_SEND"
+
+      - name: Skip duplicate daily broadcast
+        if: steps.guard.outputs.should_send != 'true'
+        run: echo "Today's broadcast has already been delivered."
 
       - name: Set up Python
+        if: steps.guard.outputs.should_send == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
 
       - name: Install image dependencies and Chinese fonts
+        if: steps.guard.outputs.should_send == 'true'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y fonts-noto-cjk
-          python -m pip install --upgrade pip
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends fonts-noto-cjk
           python -m pip install -r requirements.txt
 
-      - name: Run tests
+      - name: Run tests for manual checks
+        if: steps.guard.outputs.should_send == 'true' && github.event_name == 'workflow_dispatch'
         run: python -m unittest discover -s tests -v
 
       - name: Generate live card and broadcast to Discord
+        if: steps.guard.outputs.should_send == 'true'
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          DRY_RUN: ${{ steps.guard.outputs.dry_run }}
           OUTPUT_IMAGE_PATH: /tmp/fear-greed-card.png
           WEBHOOK_USERNAME: 市场情绪播报
         run: python src/fear_greed_bot.py
+
+      - name: Record successful daily delivery
+        if: steps.guard.outputs.should_send == 'true' && success() && steps.guard.outputs.dry_run != 'true'
+        shell: bash
+        run: |
+          mkdir -p .state
+          echo "${{ steps.guard.outputs.today }}" > .state/last_sent_date.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .state/last_sent_date.txt
+          if ! git diff --cached --quiet; then
+            git commit -m "Record Fear & Greed broadcast ${{ steps.guard.outputs.today }}"
+            git push
+          fi
 
       - name: Upload preview artifact
         if: always() && github.event_name == 'workflow_dispatch'
