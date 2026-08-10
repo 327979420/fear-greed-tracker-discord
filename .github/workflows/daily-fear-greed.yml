@@ -8,17 +8,19 @@ on:
         required: false
         default: false
         type: boolean
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/daily-fear-greed.yml"
   schedule:
-    # Staggered fallbacks around 08:30 China Standard Time.
-    # GitHub may delay or drop individual scheduled events.
-    - cron: "27 0 * * *"
-    - cron: "42 0 * * *"
-    - cron: "57 0 * * *"
+    # NYSE core session opens at 09:30 America/New_York.
+    # First attempt is 47 minutes after the open to give CNN's index time to refresh.
+    # Later attempts are fallbacks in case GitHub drops or delays an individual schedule event.
+    # Monday-Friday only; no weekend broadcasts.
+    - cron: "17 10 * * 1-5"
+      timezone: "America/New_York"
+    - cron: "47 10 * * 1-5"
+      timezone: "America/New_York"
+    - cron: "17 11 * * 1-5"
+      timezone: "America/New_York"
+    - cron: "47 11 * * 1-5"
+      timezone: "America/New_York"
 
 permissions:
   contents: write
@@ -44,24 +46,33 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           DRY_RUN_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
         run: |
-          TODAY="$(TZ=Asia/Shanghai date +%F)"
+          MARKET_DATE="$(TZ=America/New_York date +%F)"
+          MARKET_WEEKDAY="$(TZ=America/New_York date +%u)"
+          MARKET_TIME="$(TZ=America/New_York date +%H:%M)"
           LAST_SENT="$(cat .state/last_sent_date.txt 2>/dev/null || true)"
           SHOULD_SEND=true
 
-          if [[ "$EVENT_NAME" == "schedule" || "$EVENT_NAME" == "push" ]]; then
-            if [[ "$LAST_SENT" == "$TODAY" ]]; then
+          # Scheduled delivery is market-day only and only after the regular session has opened.
+          if [[ "$EVENT_NAME" == "schedule" ]]; then
+            if [[ "$MARKET_WEEKDAY" -gt 5 ]]; then
+              SHOULD_SEND=false
+            fi
+            if [[ "$MARKET_TIME" < "10:00" ]]; then
+              SHOULD_SEND=false
+            fi
+            if [[ "$LAST_SENT" == "$MARKET_DATE" ]]; then
               SHOULD_SEND=false
             fi
           fi
 
-          echo "today=$TODAY" >> "$GITHUB_OUTPUT"
+          echo "today=$MARKET_DATE" >> "$GITHUB_OUTPUT"
           echo "should_send=$SHOULD_SEND" >> "$GITHUB_OUTPUT"
           echo "dry_run=$DRY_RUN_INPUT" >> "$GITHUB_OUTPUT"
-          echo "event=$EVENT_NAME today=$TODAY last_sent=$LAST_SENT should_send=$SHOULD_SEND"
+          echo "event=$EVENT_NAME market_date=$MARKET_DATE market_time=$MARKET_TIME last_sent=$LAST_SENT should_send=$SHOULD_SEND"
 
-      - name: Skip duplicate daily broadcast
+      - name: Skip duplicate or out-of-session broadcast
         if: steps.guard.outputs.should_send != 'true'
-        run: echo "Today's broadcast has already been delivered."
+        run: echo "Broadcast skipped because today's market-session report was already delivered or this run is outside the configured window."
 
       - name: Set up Python
         if: steps.guard.outputs.should_send == 'true'
