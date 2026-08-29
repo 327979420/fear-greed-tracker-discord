@@ -17,7 +17,7 @@
 
 ## 自动运行
 
-GitHub Actions 默认每天 `00:30 UTC` 执行，即 **北京时间 08:30**。
+GitHub Actions 默认在美股交易日收盘约两小时后开始尝试执行，并安排多次后备调度。实际启动时间可能因 GitHub Actions 排队而延迟；程序会根据 CNN 数据快照日期去重，确保同一个收盘数据只发送一次。
 
 项目不需要服务器，也不需要 Discord Bot，只使用一个 Discord Webhook。
 
@@ -59,15 +59,9 @@ Linux 环境需要安装支持中文的字体，例如 `fonts-noto-cjk`。GitHub
 
 ## 修改播报时间
 
-编辑 `.github/workflows/daily-fear-greed.yml` 中的 cron。GitHub Actions cron 使用 UTC。
+编辑 `.github/workflows/daily-fear-greed.yml` 中的 cron。未指定 `timezone` 时，GitHub Actions cron 默认使用 UTC。
 
-```yaml
-# 北京时间 08:30
-- cron: "30 0 * * *"
-
-# 北京时间 09:00
-- cron: "0 1 * * *"
-```
+当前配置使用 `America/New_York` 时区，自动适应美国夏令时。修改时应保留非整点分钟和后备调度，以降低 GitHub 排队延迟或漏触发的影响。
 
 ## 可选环境变量
 

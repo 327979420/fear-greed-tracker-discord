@@ -40,55 +40,50 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Check daily delivery state
-        id: guard
-        shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          DRY_RUN_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
-        run: |
-          MARKET_DATE="$(TZ=America/New_York date +%F)"
-          MARKET_WEEKDAY="$(TZ=America/New_York date +%u)"
-          MARKET_TIME="$(TZ=America/New_York date +%H:%M)"
-          LAST_SENT="$(cat .state/last_sent_date.txt 2>/dev/null || true)"
-          SHOULD_SEND=true
-
-          # Scheduled delivery is US-market-weekday only and must be well after
-          # the 16:00 ET regular-session close so the score can settle.
-          if [[ "$EVENT_NAME" == "schedule" ]]; then
-            if [[ "$MARKET_WEEKDAY" -gt 5 ]]; then
-              SHOULD_SEND=false
-            fi
-            if [[ "$MARKET_TIME" < "18:00" ]]; then
-              SHOULD_SEND=false
-            fi
-            if [[ "$LAST_SENT" == "$MARKET_DATE" ]]; then
-              SHOULD_SEND=false
-            fi
-          fi
-
-          echo "today=$MARKET_DATE" >> "$GITHUB_OUTPUT"
-          echo "should_send=$SHOULD_SEND" >> "$GITHUB_OUTPUT"
-          echo "dry_run=$DRY_RUN_INPUT" >> "$GITHUB_OUTPUT"
-          echo "event=$EVENT_NAME market_date=$MARKET_DATE market_time=$MARKET_TIME last_sent=$LAST_SENT should_send=$SHOULD_SEND"
-
-      - name: Skip duplicate or out-of-session broadcast
-        if: steps.guard.outputs.should_send != 'true'
-        run: echo "Broadcast skipped because today's post-close report was already delivered or this run is outside the configured window."
-
       - name: Set up Python
-        if: steps.guard.outputs.should_send == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
 
       - name: Install image dependencies and Chinese fonts
-        if: steps.guard.outputs.should_send == 'true'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends fonts-noto-cjk
           python -m pip install -r requirements.txt
+
+      - name: Check latest CNN delivery state
+        id: guard
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DRY_RUN_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+        run: |
+          SNAPSHOT_DATE="$(python - <<'PY'
+          from zoneinfo import ZoneInfo
+          from src.fear_greed_bot import fetch_json, parse_snapshot
+
+          snapshot = parse_snapshot(fetch_json())
+          print(snapshot.timestamp.astimezone(ZoneInfo("America/New_York")).date().isoformat())
+          PY
+          )"
+          LAST_SENT="$(cat .state/last_sent_date.txt 2>/dev/null || true)"
+          SHOULD_SEND=true
+
+          # Scheduled jobs can be delayed by GitHub for hours and may cross
+          # midnight. Deduplicate using CNN's snapshot date, not runner time.
+          if [[ "$EVENT_NAME" == "schedule" && "$LAST_SENT" == "$SNAPSHOT_DATE" ]]; then
+            SHOULD_SEND=false
+          fi
+
+          echo "snapshot_date=$SNAPSHOT_DATE" >> "$GITHUB_OUTPUT"
+          echo "should_send=$SHOULD_SEND" >> "$GITHUB_OUTPUT"
+          echo "dry_run=$DRY_RUN_INPUT" >> "$GITHUB_OUTPUT"
+          echo "event=$EVENT_NAME snapshot_date=$SNAPSHOT_DATE last_sent=$LAST_SENT should_send=$SHOULD_SEND"
+
+      - name: Skip duplicate broadcast
+        if: steps.guard.outputs.should_send != 'true'
+        run: echo "Broadcast skipped because this CNN snapshot was already delivered."
 
       - name: Run tests for manual checks
         if: steps.guard.outputs.should_send == 'true' && github.event_name == 'workflow_dispatch'
@@ -108,12 +103,12 @@ jobs:
         shell: bash
         run: |
           mkdir -p .state
-          echo "${{ steps.guard.outputs.today }}" > .state/last_sent_date.txt
+          echo "${{ steps.guard.outputs.snapshot_date }}" > .state/last_sent_date.txt
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .state/last_sent_date.txt
           if ! git diff --cached --quiet; then
-            git commit -m "Record Fear & Greed broadcast ${{ steps.guard.outputs.today }}"
+            git commit -m "Record Fear & Greed broadcast ${{ steps.guard.outputs.snapshot_date }}"
             git push
           fi
 
