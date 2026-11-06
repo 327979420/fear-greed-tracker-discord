@@ -3,20 +3,20 @@
 from __future__ import annotations
 
 import json
-import math
 import mimetypes
 import os
 import sys
 import time
 import uuid
 from dataclasses import dataclass
+from functools import lru_cache
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageColor, ImageDraw, ImageFont
 
 API_URL = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
 OUTPUT_PATH = os.getenv("OUTPUT_IMAGE_PATH", "/tmp/fear-greed-card.png")
@@ -24,23 +24,20 @@ TIMEOUT = 25
 RETRIES = 3
 BEIJING = timezone(timedelta(hours=8))
 
+# Dark card: it sits on Discord's dark theme, and only the score carries colour.
 COLORS = {
-    "bg": "#F6F7F9",
-    "panel": "#FFFFFF",
-    "border": "#E5E7EB",
-    "text": "#111827",
-    "muted": "#4B5563",
+    "bg": "#15171C",
+    "text": "#F3F4F6",
+    "muted": "#9CA3AF",
     "subtle": "#6B7280",
+    "line": "#D1D5DB",
+    "up": "#4ADE80",
+    "down": "#F87171",
     "extreme fear": "#EF4444",
     "fear": "#F97316",
-    "neutral": "#9CA3AF",
-    "greed": "#22A447",
-    "extreme greed": "#15803D",
-    "extreme fear fill": "#FEE2E2",
-    "fear fill": "#FFEDD5",
-    "neutral fill": "#F3F4F6",
-    "greed fill": "#E4F6E8",
-    "extreme greed fill": "#DCFCE7",
+    "neutral": "#A1A1AA",
+    "greed": "#4ADE80",
+    "extreme greed": "#16A34A",
 }
 
 ZONE_META = {
@@ -94,10 +91,6 @@ def zone_label(score: float | None) -> str:
 
 def zone_color(score: float | None) -> str:
     return COLORS["neutral"] if score is None else COLORS[classify(score)]
-
-
-def zone_fill(score: float | None) -> str:
-    return COLORS["neutral fill"] if score is None else COLORS[f"{classify(score)} fill"]
 
 
 def format_score(value: float | None) -> str:
@@ -222,6 +215,9 @@ def parse_snapshot(payload: dict[str, Any]) -> Snapshot:
     )
 
 
+ZONES = [(0, 24, "extreme fear"), (25, 44, "fear"), (45, 55, "neutral"), (56, 75, "greed"), (76, 100, "extreme greed")]
+
+
 def _font_path(bold: bool) -> str | None:
     configured = os.getenv("FONT_BOLD" if bold else "FONT_REGULAR", "").strip()
     candidates = [configured] if configured else []
@@ -234,149 +230,116 @@ def _font_path(bold: bool) -> str | None:
     return next((item for item in candidates if item and Path(item).exists()), None)
 
 
+@lru_cache(maxsize=None)
+def _face_index(path: str, bold: bool) -> int:
+    """Pick the Simplified Chinese face of the wanted weight from a font collection."""
+    styles = ("Bold", "Semibold") if bold else ("Regular",)
+    for index in range(40):
+        try:
+            family, style = ImageFont.truetype(path, 12, index=index).getname()
+        except OSError:
+            break
+        if "SC" in (family or "").split() and style in styles:
+            return index
+    return 0
+
+
 def font(size: int, bold: bool = False) -> ImageFont.ImageFont:
     path = _font_path(bold)
-    return ImageFont.truetype(path, size) if path else ImageFont.load_default()
+    if not path:
+        return ImageFont.load_default(size)
+    index = _face_index(path, bold) if path.endswith(".ttc") else 0
+    return ImageFont.truetype(path, size, index=index)
 
 
-def rounded(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], radius: int = 24, fill: str = COLORS["panel"], outline: str = COLORS["border"], width: int = 2) -> None:
-    draw.rounded_rectangle(box, radius=radius, fill=fill, outline=outline, width=width)
+def tint(color: str, amount: float) -> tuple[int, int, int]:
+    """Blend a colour into the card background; amount 1 is the colour itself."""
+    top, base = ImageColor.getrgb(color), ImageColor.getrgb(COLORS["bg"])
+    return tuple(round(b + (t - b) * amount) for t, b in zip(top, base))  # type: ignore[return-value]
 
 
-def centered(draw: ImageDraw.ImageDraw, center: tuple[float, float], text: str, text_font: ImageFont.ImageFont, fill: str) -> None:
-    box = draw.textbbox((0, 0), text, font=text_font)
-    draw.text((center[0] - (box[2] - box[0]) / 2, center[1] - (box[3] - box[1]) / 2), text, font=text_font, fill=fill)
+def text_width(draw: ImageDraw.ImageDraw, text: str, text_font: ImageFont.ImageFont) -> float:
+    return draw.textlength(text, font=text_font)
 
 
-def pill(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], text: str, score: float | None) -> None:
-    draw.rounded_rectangle(box, radius=(box[3] - box[1]) // 2, fill=zone_fill(score))
-    centered(draw, ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2), text, font(19, True), zone_color(score))
-
-
-def score_angle(score: float) -> float:
-    return 180 + score * 1.8
-
-
-def marker_segment(center: tuple[int, int], score: float) -> tuple[float, float, float, float]:
-    cx, cy = center
-    angle = math.radians(score_angle(score))
-    inner = 246
-    outer = 302
-    return (
-        cx + math.cos(angle) * inner,
-        cy + math.sin(angle) * inner,
-        cx + math.cos(angle) * outer,
-        cy + math.sin(angle) * outer,
-    )
+def change_color(change: str) -> str:
+    return COLORS["up"] if change.startswith("↑") else COLORS["down"] if change.startswith("↓") else COLORS["muted"]
 
 
 def render_card(snapshot: Snapshot, output_path: str = OUTPUT_PATH) -> str:
-    width, height = 1600, 900
+    """Draw a 1200x675 card that stays legible when Discord shrinks it to ~550px."""
+    width, height = 1200, 675
     image = Image.new("RGB", (width, height), COLORS["bg"])
     draw = ImageDraw.Draw(image)
+    left, column, right = 64, 620, 1136
+    current = zone_color(snapshot.score)
 
-    draw.text((38, 28), "美股 Fear & Greed 每日播报", font=font(50, True), fill=COLORS["text"])
-    draw.text((40, 94), "CNN Fear & Greed Index", font=font(22), fill=COLORS["muted"])
-    updated = snapshot.timestamp.astimezone(BEIJING).strftime("%Y年%m月%d日 %H:%M（北京时间）")
-    updated_box = draw.textbbox((0, 0), updated, font=font(21))
-    draw.text((1560 - (updated_box[2] - updated_box[0]), 42), updated, font=font(21), fill=COLORS["text"])
-    source = "数据来源：CNN Business"
-    source_box = draw.textbbox((0, 0), source, font=font(19))
-    draw.text((1560 - (source_box[2] - source_box[0]), 88), source, font=font(19), fill=COLORS["subtle"])
+    # Quiet header, so the score is the only loud element on the card.
+    draw.text((left, 84), "美股恐贪指数", font=font(30, True), fill=COLORS["text"], anchor="ls")
+    draw.text((left + text_width(draw, "美股恐贪指数", font(30, True)) + 16, 84), "CNN Fear & Greed", font=font(26), fill=COLORS["subtle"], anchor="ls")
+    updated = snapshot.timestamp.astimezone(BEIJING).strftime("%m月%d日 %H:%M 北京时间")
+    draw.text((right, 84), updated, font=font(26), fill=COLORS["muted"], anchor="rs")
 
-    meter_panel = (34, 128, 1052, 850)
-    rounded(draw, meter_panel, 28)
-    cx, cy = 520, 560
-    radius = 332
+    # Visual centre: score and zone.
+    draw.text((left - 8, 318), format_score(snapshot.score), font=font(210, True), fill=current, anchor="ls")
+    draw.text((left, 396), zone_label(snapshot.score), font=font(56, True), fill=current, anchor="ls")
+    draw.text((left + text_width(draw, zone_label(snapshot.score), font(56, True)) + 18, 396), snapshot.rating.upper(), font=font(24), fill=COLORS["subtle"], anchor="ls")
 
-    segments = [(0, 24, "extreme fear"), (25, 44, "fear"), (45, 55, "neutral"), (56, 75, "greed"), (76, 100, "extreme greed")]
-    for low, high, key in segments:
-        draw.arc((cx - radius, cy - radius, cx + radius, cy + radius), start=score_angle(low), end=score_angle(high), fill=COLORS[key], width=52)
+    # Where the score sits on the 0-100 scale.
+    bar_top, bar_height, gap = 440, 14, 6
+    span = column - left
+    for low, high, key in ZONES:
+        x1 = left + low / 100 * span + (0 if low == 0 else gap / 2)
+        x2 = left + min(high + 1, 100) / 100 * span - (0 if high == 100 else gap / 2)
+        active = classify(snapshot.score) == key
+        draw.rounded_rectangle((x1, bar_top, x2, bar_top + bar_height), radius=bar_height // 2, fill=COLORS[key] if active else tint(COLORS[key], 0.35))
+    marker_x = left + max(0, min(100, snapshot.score)) / 100 * span
+    marker_y = bar_top + bar_height / 2
+    draw.ellipse((marker_x - 15, marker_y - 15, marker_x + 15, marker_y + 15), fill=COLORS["bg"])
+    draw.ellipse((marker_x - 11, marker_y - 11, marker_x + 11, marker_y + 11), fill=COLORS["text"])
+    draw.text((left, bar_top + 52), "极度恐慌", font=font(22), fill=COLORS["subtle"], anchor="ls")
+    draw.text((column, bar_top + 52), "极度贪婪", font=font(22), fill=COLORS["subtle"], anchor="rs")
 
-    draw.arc((cx - 262, cy - 262, cx + 262, cy + 262), start=180, end=360, fill="#EEF2F7", width=2)
-
-    for tick in range(0, 101, 5):
-        a = math.radians(score_angle(tick))
-        outer = 290
-        inner = 262 if tick % 25 == 0 else 272
-        draw.line(
-            (cx + math.cos(a) * outer, cy + math.sin(a) * outer, cx + math.cos(a) * inner, cy + math.sin(a) * inner),
-            fill="#CBD5E1",
-            width=2 if tick % 25 == 0 else 1,
-        )
-        if tick in (0, 100):
-            centered(draw, (cx + math.cos(a) * 242, cy + math.sin(a) * 242), str(tick), font(16), COLORS["text"])
-
-    labels = [(132, 430, "extreme fear"), (292, 220, "fear"), (520, 150, "neutral"), (748, 220, "greed"), (908, 430, "extreme greed")]
-    for x, y, key in labels:
-        label, score_range = ZONE_META[key]
-        centered(draw, (x, y), label, font(22, True), COLORS[key])
-        centered(draw, (x, y + 36), score_range, font(16), COLORS["text"])
-
-    marker = marker_segment((cx, cy), snapshot.score)
-    draw.line(marker, fill=COLORS["text"], width=12)
-    draw.ellipse((marker[0] - 10, marker[1] - 10, marker[0] + 10, marker[1] + 10), fill="#FFFFFF", outline=COLORS["text"], width=4)
-
-    current_color = zone_color(snapshot.score)
-    centered(draw, (cx, 430), "当前指数", font(21, True), COLORS["subtle"])
-    centered(draw, (cx, 548), format_score(snapshot.score), font(136, True), current_color)
-    centered(draw, (cx, 682), zone_label(snapshot.score), font(58, True), current_color)
-    centered(draw, (cx, 738), snapshot.rating.upper(), font(24), COLORS["subtle"])
-
-    history_panel = (1072, 128, 1566, 378)
-    rounded(draw, history_panel, 26)
-    draw.text((1096, 154), "历史对比", font=font(27, True), fill=COLORS["text"])
-    comparisons = [("上一交易日", snapshot.previous_close), ("一周前", snapshot.previous_1_week)]
+    # Secondary: change against earlier readings.
+    comparisons = [("较前一交易日", snapshot.previous_close), ("较一周前", snapshot.previous_1_week)]
     for index, (label, value) in enumerate(comparisons):
-        x = 1096 + index * 224
-        y = 202
-        rounded(draw, (x, y, x + 206, y + 148), 20, "#FBFBFC")
-        centered(draw, (x + 103, y + 27), label, font(18), COLORS["muted"])
-        centered(draw, (x + 103, y + 73), format_score(value), font(42, True), zone_color(value))
-        pill(draw, (x + 20, y + 106, x + 116, y + 138), zone_label(value), value)
+        x = left + index * 290
         change = change_text(snapshot.score, value)
-        change_color = COLORS["greed"] if change.startswith("↑") else COLORS["extreme fear"] if change.startswith("↓") else COLORS["subtle"]
-        draw.text((x + 126, y + 111), change, font=font(17, True), fill=change_color)
+        draw.text((x, 566), label, font=font(24), fill=COLORS["muted"], anchor="ls")
+        draw.text((x, 616), change, font=font(40, True), fill=change_color(change), anchor="ls")
+        if value is not None:
+            draw.text((x + text_width(draw, change, font(40, True)) + 14, 616), f"({format_score(value)})", font=font(24), fill=COLORS["subtle"], anchor="ls")
 
-    trend_panel = (1072, 398, 1566, 850)
-    rounded(draw, trend_panel, 26)
-    draw.text((1096, 424), "近30个交易日", font=font(27, True), fill=COLORS["text"])
-    left, top, right, bottom = 1122, 492, 1518, 772
-    bands = [(0, 24, "extreme fear"), (25, 44, "fear"), (45, 55, "neutral"), (56, 75, "greed"), (76, 100, "extreme greed")]
-    for low, high, key in bands:
-        y1 = bottom - high / 100 * (bottom - top)
-        y2 = bottom - low / 100 * (bottom - top)
-        draw.rectangle((left, y1, right, y2), fill=COLORS[f"{key} fill"])
-    for tick in (0, 25, 50, 75, 100):
-        y = bottom - tick / 100 * (bottom - top)
-        draw.line((left, y, right, y), fill="#D1D5DB", width=1)
-        centered(draw, (left - 20, y), str(tick), font(13), COLORS["muted"])
+    # Context: the last 30 trading days, faint zone bands behind a neutral line.
+    chart_left, chart_top, chart_right, chart_bottom = 700, 168, right, 560
+    draw.text((chart_left, 140), "近 30 个交易日", font=font(24), fill=COLORS["muted"], anchor="ls")
+    for low, high, key in ZONES:
+        y1 = chart_bottom - min(high + 1, 100) / 100 * (chart_bottom - chart_top)
+        y2 = chart_bottom - low / 100 * (chart_bottom - chart_top)
+        draw.rectangle((chart_left, y1, chart_right, y2), fill=tint(COLORS[key], 0.12))
+    for tick in (25, 50, 75):
+        y = chart_bottom - tick / 100 * (chart_bottom - chart_top)
+        draw.text((chart_right - 6, y - 6), str(tick), font=font(18), fill=COLORS["subtle"], anchor="rs")
 
     points = list(snapshot.history)
     if len(points) >= 2:
-        coordinates: list[tuple[float, float]] = []
-        for index, point in enumerate(points):
-            x = left + index / (len(points) - 1) * (right - left)
-            y = bottom - max(0, min(100, point.score)) / 100 * (bottom - top)
-            coordinates.append((x, y))
-        draw.line(coordinates, fill="#159447", width=4)
-        for x, y in coordinates:
-            draw.ellipse((x - 3, y - 3, x + 3, y + 3), fill="#FFFFFF", outline="#159447", width=2)
+        coordinates = [
+            (
+                chart_left + index / (len(points) - 1) * (chart_right - chart_left - 48),
+                chart_bottom - max(0, min(100, point.score)) / 100 * (chart_bottom - chart_top),
+            )
+            for index, point in enumerate(points)
+        ]
+        draw.line(coordinates, fill=COLORS["line"], width=4, joint="curve")
         x, y = coordinates[-1]
-        draw.ellipse((x - 8, y - 8, x + 8, y + 8), fill="#FFFFFF", outline="#159447", width=4)
-        label_x = min(x - 54, right - 106)
-        label_y = max(top + 8, y - 58)
-        rounded(draw, (int(label_x), int(label_y), int(label_x + 104), int(label_y + 48)), 13, "#FFFFFF")
-        centered(draw, (label_x + 52, label_y + 24), format_score(snapshot.score), font(22, True), current_color)
-
-        label_count = min(5, len(points))
-        for index in range(label_count):
-            point_index = round(index * (len(points) - 1) / max(1, label_count - 1))
-            point = points[point_index]
-            x = left + point_index / (len(points) - 1) * (right - left)
-            centered(draw, (x, bottom + 20), point.when.astimezone(BEIJING).strftime("%m-%d"), font(12), COLORS["muted"])
+        draw.ellipse((x - 13, y - 13, x + 13, y + 13), fill=COLORS["bg"])
+        draw.ellipse((x - 9, y - 9, x + 9, y + 9), fill=current)
+        draw.text((chart_left, chart_bottom + 40), points[0].when.astimezone(BEIJING).strftime("%m-%d"), font=font(20), fill=COLORS["subtle"], anchor="ls")
+        draw.text((x, chart_bottom + 40), points[-1].when.astimezone(BEIJING).strftime("%m-%d"), font=font(20), fill=COLORS["subtle"], anchor="ms")
     else:
-        centered(draw, ((left + right) / 2, (top + bottom) / 2), "历史数据暂不可用", font(17), COLORS["muted"])
+        draw.text(((chart_left + chart_right) / 2, (chart_top + chart_bottom) / 2), "历史数据暂不可用", font=font(22), fill=COLORS["muted"], anchor="mm")
+
+    draw.text((right, 640), "数据来源：CNN Business", font=font(20), fill=COLORS["subtle"], anchor="rs")
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)

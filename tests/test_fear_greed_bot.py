@@ -12,7 +12,6 @@ from fear_greed_bot import (  # noqa: E402
     build_payload,
     change_text,
     classify,
-    marker_segment,
     parse_snapshot,
     render_card,
     zone_label,
@@ -62,13 +61,6 @@ class FearGreedBotTests(unittest.TestCase):
         payload = build_payload(snapshot)
         self.assertEqual(payload["content"], "今日落入‘贪婪’区间：58.2")
 
-    def test_marker_does_not_cross_center(self):
-        x1, y1, x2, y2 = marker_segment((520, 520), 58.2)
-        inner_distance = ((x1 - 520) ** 2 + (y1 - 520) ** 2) ** 0.5
-        outer_distance = ((x2 - 520) ** 2 + (y2 - 520) ** 2) ** 0.5
-        self.assertGreaterEqual(inner_distance, 237.9)
-        self.assertGreater(outer_distance, inner_distance)
-
     def test_render_card(self):
         snapshot = parse_snapshot(SAMPLE)
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -76,7 +68,7 @@ class FearGreedBotTests(unittest.TestCase):
             render_card(snapshot, str(output))
             self.assertTrue(output.exists())
             with Image.open(output) as image:
-                self.assertEqual(image.size, (1600, 900))
+                self.assertEqual(image.size, (1200, 675))
                 self.assertEqual(image.format, "PNG")
 
     def test_zone_label(self):

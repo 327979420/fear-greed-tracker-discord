@@ -6,7 +6,7 @@ A Chinese visual briefing for me and my Discord group, designed for a quick chec
 
 ![Generated CNN Fear and Greed sentiment card](assets/fear-greed-card.png)
 
-*Real preview generated on 22 September 2026 from CNN data. This saved example is not a live or final closing reading.*
+*Real preview generated on 6 November 2026 from CNN data. This saved example is not a live or final closing reading.*
 
 ## What it shows
 
